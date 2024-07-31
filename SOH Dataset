@@ -1,0 +1,205 @@
+USE [Test]
+GO
+/****** Object:  StoredProcedure [dbo].[BPCS0_KMR_SOHVSKMR_V3]    Script Date: 31/07/2024 12:48:58 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ 
+ 
+ 
+ 
+ 
+-- =========================================================================
+-- Author:		Khaya Thebe
+-- Create date: 2024-07-01
+-- Description:	SOH VS KMR W+1 AND W+2
+ 
+-- -- =========================================================================
+ 
+Create PROCEDURE [dbo].[BPCS0_KMR_SOHVSKMR_V3]
+	@LinkedServer		varchar(10),
+	@Facility		varchar(MAX),
+	@DateSelection	  datetime,
+	@DateSelection2	  datetime,
+	@ConsumptionType  varchar(max)
+
+ 
+AS
+BEGIN
+ 
+	-- Prevent extra result sets from interfering with SELECT statements
+	--SET NOCOUNT ON;
+ 
+	-- Declare local variables
+	DECLARE @SQL				nvarchar(max)
+	DECLARE @Library			varchar(10)
+    DECLARE @Library_Fifo       varchar(10)
+	DECLARE @FacilityListInString varchar(Max)
+	DECLARE @DateSelectionNew	  datetime
+	DECLARE @ConsumptionListInString varchar(Max)
+	DECLARE @Return					int
+	/*DECLARE @DateSelectionListInString varchar(Max)
+	DECLARE @DateSelection2ListInString varchar(Max)
+	*/
+ 
+ 
+	
+	-- Set parameters to legal defaults when applying NULL/BLANK execution
+	IF (@LinkedServer IS NULL) or (@LinkedServer = '') BEGIN
+			  SET @LinkedServer			= 'TEST'
+	          SET @Library				='TEST'
+		      SET @DateSelection = '20240709' --DATEADD(DAY, 2 - DATEPART(WEEKDAY, CAST(@DateSelection AS DATE)), CAST(@DateSelection AS DATE))        --'20240701' 
+      	      SET @DateSelection2 = '20240726' -- @DateSelection2--'20240731'--DATEADD(MM,1,CURRENT_TIMESTAMP)--CURRENT_TIMESTAMP
+			  SET @facility = '03' -- '03'
+			  SET @ConsumptionType  = 'F'
+	END
+ 
+ 
+ 
+		IF @LinkedServer = 'BPCS_REP' BEGIN
+	          SET @Library				='tEST'
+		      SET @DateSelection = @DateSelection--DATEADD(DAY, 2 - DATEPART(WEEKDAY, CAST(@DateSelection AS DATE)), CAST(@DateSelection AS DATE))        --'20240701' 
+      	      SET @DateSelection2 = @DateSelection2--'20240731'--DATEADD(MM,1,CURRENT_TIMESTAMP)--CURRENT_TIMESTAMP
+			  SET @facility =  @facility --'03' -- '03'
+			  SET @ConsumptionType  = @ConsumptionType --'F'
+	END
+ 
+ 
+	-- In String - List Critical Rating
+	EXEC @Return =  [dbo].[FC_InString]
+		@P_String =  @facility,
+		@P_StringOut = @facilityListInString OUTPUT,
+		@P_Type = 'A'
+	PRINT ('---------------------------------------')
+ 
+ 
+		EXEC @Return =  [dbo].[FC_InString]
+		@P_String =  @ConsumptionType,
+		@P_StringOut = 	@ConsumptionListInString OUTPUT,
+		@P_Type = 'A'
+	PRINT ('---------------------------------------')
+ 
+	
+	SET @DateSelectionNew = @DateSelection
+	IF @ConsumptionType like '%F%' BEGIN
+ 
+	  
+	SET @DateSelectionNew = DATEADD(DAY, 2 - DATEPART(WEEKDAY, CAST(@DateSelection AS DATE)), CAST(@DateSelection AS DATE))        --'20240701'
+ 
+	--SET @DateSelectionNew = CURRENT_TIMESTAMP
+ 
+	END
+ 
+	PRINT (@DateSelectionNew)
+ 
+	SET @SQL =
+	'
+	Select distinct COMNSUMPTION.ItemCode,Description,class,DATES,QTY,FACILITY,Case When SOH.StockQty is null then 0 else SOH.StockQty end as SOH,
+	Case When OpenPurchaseOrders is null then 0 else OpenPurchaseOrders end as OpenPurchaseOrders ,CONSUMPTIONTYPE
+	FROM(
+Select  mprod AS ITEMCODE,idesc AS Description,iclas as class,mrdte AS DATES,
+SUM(mqty) OVER (PARTITION BY mprod,mrdte,mrfac ) AS QTY, mrfac AS FACILITY,''F'' AS CONSUMPTIONTYPE
+from '+@Library+'.kmr 
+inner join '+@Library+'.iim on mprod = iprod
+inner join '+@Library+'.cic on mrfac = icfac and mprod = icprod
+where mrdte  between '+convert(varchar(10),@DateSelectionNew,112)+' AND '+convert(varchar(10),@DateSelection2,112)+'
+ 
+ 
+and MRFAC in '+@facilityListInString+'
+ 
+Union all
+ 
+SELECT  MPROD as ItemCode,idesc as description,iclas as class,
+mrdte as dates,Sum(CASE WHEN MQISS > MQREQ THEN 0 
+ELSE MQREQ - MQISS  END) AS qty,MAFAC as facility,''S'' as CONSUMPTIONTYPE
+FROM '+@Library+'.fma
+INNER JOIN '+@Library+'.IIM ON MPROD=IPROD
+where mrdte  between '+convert(varchar(10),@DateSelectionNew,112)+' AND '+convert(varchar(10),@DateSelection2,112)+'
+and mid = ''MA''
+and MAFAC in '+@facilityListInString+'
+group by MAFAC ,MPROD,mrdte,mid,idesc,iclas
+ 
+Union All
+ 
+SELECT  SPROD AS ITEMCODE,IDESC as description,iclas as class,
+SRDTE AS DATES,Sum(CASE WHEN SQFIN > SQREQ THEN 0 
+ELSE SQREQ - SQFIN  END) AS QTY,SOFAC AS FACILITY,''S'' as CONSUMPTIONTYPE
+FROM '+@Library+'.fso
+INNER JOIN '+@Library+'.IIM ON SPROD=IPROD 
+where  srdte  between '+convert(varchar(10),@DateSelectionNew,112)+' AND '+convert(varchar(10),@DateSelection2,112)+'
+and SOFAC  in '+@facilityListInString+'
+GROUP BY SPROD,SRDTE,SOFAC,IDESC,iclas
+)COMNSUMPTION
+ 
+ 
+LEFT JOIN 
+(
+Select ItemCode,StockQty
+from (
+select Distinct ItemCode,sum(StockQty) over (partition by ItemCode ) as StockQty
+from(
+Select
+ILI.lprod as ItemCode, 
+ILI.LOPB+ILI.LRCT+ILI.LADJU-ILI.LISSU as StockQty
+from '+@Library+'.ili ILI inner join '+@Library+'.iim IIM on ILI.lprod = IIM.iprod
+inner join '+@Library+'.iwm IWM on ILI.lwhs = IWM.lwhs
+and LNETW=''Y''
+inner join '+@Library+'.ilm ILM on IWM.lwhs = ILM.wwhs and ILI.lloc = ILM.wloc
+where IWM.WMFAC  in '+@facilityListInString+'
+)
+group by ItemCode,StockQty
+order by ItemCode
+ 
+ 
+))  SOH ON SOH.ITEMCODE=COMNSUMPTION.ITEMCODE
+ 
+Left JOIN (
+select pprod as ItemCodes, 
+sum(pqord-pqrec) AS OpenPurchaseOrders 
+from '+@Library+'.hpo inner join '+@Library+'.hph on phord = pord 																	
+inner join '+@Library+'.iim on pprod = iprod																	
+where case when pddte >= hvdue then pddte else hvdue end  <= '+convert(varchar(10),@DateSelection2,112)+' 	 																
+and PHCOMP = 1																	
+    AND PVEND >= 0  and PVEND <= 99999999																	
+AND PID in (''PO''																	
+,''RQ'')																	
+and pqord-pqrec > 0 																	
+and pstat <> ''3'' 																	
+group by pprod
+ 
+ 
+ 
+)  ON COMNSUMPTION.ITEMCODE=ItemCodes
+ 
+ 
+'
+IF @ConsumptionType =  'S'
+SET @SQL = @SQL  + ' WHERE CONSUMPTIONTYPE in '+@ConsumptionListInString+'
+order by COMNSUMPTION.ITEMCODE
+'
+IF @ConsumptionType =  'F'
+SET @SQL = @SQL  + ' WHERE CONSUMPTIONTYPE in '+@ConsumptionListInString+'
+order by COMNSUMPTION.ITEMCODE
+'
+ 
+IF @ConsumptionType =  'S,F'
+SET @SQL = @SQL  + ' WHERE CONSUMPTIONTYPE in '+@ConsumptionListInString+'
+order by COMNSUMPTION.ITEMCODE
+'
+ 
+ 
+ 
+ 
+	-- Convert the SQL to OpenQuery
+	SET @SQL = 'SELECT  * FROM OPENQUERY('+@LinkedServer+', ''' + REPLACE(@SQL, '''', '''''') + ''')'
+ 
+   PRINT(@SQL);
+ 
+	EXEC(@SQL);
+ 
+	--MRDTE
+	--NOT ITEMS SHOW ALL ITEMS
+ 
+ 
+END
